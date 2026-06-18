@@ -11,7 +11,7 @@ function getClient() {
   return _client;
 }
 
-const MODEL      = "meta-llama/llama-4-scout-17b-16e-instruct";
+const MODEL = "llama-3.1-70b-versatile";
 const MAX_TOKENS  = 550;
 const TEMPERATURE = 0.72;
 const MAX_RETRIES = 3;
