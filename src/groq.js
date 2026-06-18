@@ -5,21 +5,19 @@ const Groq = require("groq-sdk");
 let _client = null;
 
 function getClient() {
-  if (!_client) _client = new Groq({ apiKey: process.env.GROQ_API_KEY });
+  if (!_client) _client = new Groq({ apiKey: process.env.GROQ_API_KEY, timeout: 20000 });
   return _client;
 }
 
-// Modelos activos en Groq — en orden de preferencia
+// Solo modelos activos confirmados en Groq (junio 2026)
 const MODELS = [
-  "llama-3.3-70b-versatile",  // mejor calidad — principal
-  "llama3-70b-8192",          // fallback estable
-  "llama-3.1-8b-instant",     // fallback rápido
-  "gemma2-9b-it",             // último recurso
+  "llama-3.3-70b-versatile",
+  "llama-3.1-8b-instant",
 ];
 
 const MAX_TOKENS  = 550;
 const TEMPERATURE = 0.72;
-const MAX_RETRIES = 2;
+const MAX_RETRIES = 3; // más reintentos para el Premature close
 
 async function chat(systemPrompt, history) {
   const messages = [
@@ -27,9 +25,7 @@ async function chat(systemPrompt, history) {
     ...history,
   ];
 
-  for (let modelIdx = 0; modelIdx < MODELS.length; modelIdx++) {
-    const model = MODELS[modelIdx];
-
+  for (const model of MODELS) {
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       try {
         const completion = await getClient().chat.completions.create({
@@ -40,36 +36,41 @@ async function chat(systemPrompt, history) {
         });
 
         const text = completion.choices?.[0]?.message?.content?.trim();
-        if (!text) throw new Error("Respuesta vacía del modelo");
+        if (!text) throw new Error("Respuesta vacía");
 
-        if (modelIdx > 0) console.log(`[groq] ✅ Usó fallback: ${model}`);
-        console.log(`[groq] ✅ ${text.length} chars — modelo: ${model}`);
+        console.log(`[groq] ✅ OK con ${model} (intento ${attempt}) — ${text.length} chars`);
         return text;
 
       } catch (err) {
-        const isRateLimit    = err?.status === 429 || err?.message?.includes("rate_limit");
-        const isServerErr    = err?.status >= 500;
-        const isDecommission = err?.message?.includes("decommissioned");
-        const isPrematureClose = err?.message?.includes("Premature close");
+        const msg = err?.message || "";
+        console.warn(`[groq] ⚠️  ${model} intento ${attempt}: ${msg.slice(0, 100)}`);
 
-        console.warn(`[groq] ⚠️  ${model} intento ${attempt}: ${err.message?.slice(0, 80)}`);
+        // Modelo dado de baja → saltar al siguiente sin reintentar
+        if (msg.includes("decommissioned")) break;
 
-        // Modelo dado de baja o cierre prematuro → saltar al siguiente modelo directo
-        if (isDecommission || isPrematureClose) break;
+        // Premature close o error de red → esperar y reintentar
+        if (msg.includes("Premature close") || msg.includes("fetch") || err?.status >= 500) {
+          if (attempt < MAX_RETRIES) {
+            await sleep(1000 * attempt);
+            continue;
+          }
+          break;
+        }
 
-        // Rate limit o error servidor → esperar y reintentar
-        if ((isRateLimit || isServerErr) && attempt < MAX_RETRIES) {
-          await sleep(1500 * attempt);
+        // Rate limit → esperar más
+        if (err?.status === 429) {
+          await sleep(2000 * attempt);
           continue;
         }
 
+        // Otro error → siguiente modelo
         break;
       }
     }
   }
 
-  console.error("[groq] ❌ Todos los modelos fallaron");
-  return "Disculpá, tuvimos un problema técnico momentáneo. Intentá de nuevo en unos segundos o escribinos y te respondemos a la brevedad 🙏";
+  console.error("[groq] ❌ Sin respuesta de ningún modelo");
+  return "Disculpá, tuvimos un problema técnico momentáneo. Intentá de nuevo en unos segundos 🙏";
 }
 
 function sleep(ms) {
