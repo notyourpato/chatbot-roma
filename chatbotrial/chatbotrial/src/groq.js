@@ -1,77 +1,73 @@
 "use strict";
 
-const Groq = require("groq-sdk");
+const API_URL = "https://api.groq.com/openai/v1/chat/completions";
 
-let _client = null;
+const MODEL       = "llama-3.3-70b-versatile";
+const MAX_TOKENS  = 550;
+const TEMPERATURE = 0.72;
+const MAX_RETRIES = 3;
+const TIMEOUT_MS  = 30000;
 
-function getClient() {
-  if (!_client) _client = new Groq({ apiKey: process.env.GROQ_API_KEY });
-  return _client;
+function getKey() {
+  const key = process.env.GROQ_API_KEY;
+  if (!key) throw new Error("GROQ_API_KEY no configurada");
+  return key;
 }
 
-// Modelos en orden de preferencia (fallback automático)
-const MODELS = [
-  "llama-3.3-70b-versatile",   // mejor calidad
-  "llama-3.1-70b-versatile",   // fallback
-  "llama-3.1-8b-instant",      // fallback rápido
-];
-
-const MAX_TOKENS   = 550;
-const TEMPERATURE  = 0.72;
-const MAX_RETRIES  = 2;
-
-/**
- * Llama a Groq con retry automático y fallback de modelos.
- * @param {string} systemPrompt
- * @param {Array}  history  - [{role, content}]
- * @returns {Promise<string>}
- */
 async function chat(systemPrompt, history) {
   const messages = [
     { role: "system", content: systemPrompt },
     ...history,
   ];
 
-  for (let modelIdx = 0; modelIdx < MODELS.length; modelIdx++) {
-    const model = MODELS[modelIdx];
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
-    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-      try {
-        const completion = await getClient().chat.completions.create({
-          model,
+    try {
+      const res = await fetch(API_URL, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${getKey()}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model:       MODEL,
           max_tokens:  MAX_TOKENS,
           temperature: TEMPERATURE,
           messages,
-        });
+          stream:      false,
+        }),
+        signal: controller.signal,
+      });
 
-        const text = completion.choices?.[0]?.message?.content?.trim();
-        if (!text) throw new Error("Respuesta vacía del modelo");
+      clearTimeout(timer);
 
-        if (modelIdx > 0) console.log(`[groq] ✅ Usó fallback: ${model}`);
-        console.log(`[groq] ✅ ${text.length} chars generados`);
-        return text;
+      if (!res.ok) {
+        const errText = await res.text().catch(() => "");
+        throw new Error(`HTTP ${res.status}: ${errText.slice(0, 200)}`);
+      }
 
-      } catch (err) {
-        const isRateLimit = err?.status === 429 || err?.message?.includes("rate_limit");
-        const isServerErr = err?.status >= 500;
+      const data = await res.json();
+      const text = data?.choices?.[0]?.message?.content?.trim();
+      if (!text) throw new Error("Respuesta vacía");
 
-        console.warn(`[groq] ⚠️  ${model} intento ${attempt}: ${err.message}`);
+      console.log(`[groq] OK intento ${attempt} - ${text.length} chars`);
+      return text;
 
-        // Rate limit o error de servidor → esperar y reintentar
-        if ((isRateLimit || isServerErr) && attempt < MAX_RETRIES) {
-          await sleep(1500 * attempt);
-          continue;
-        }
-
-        // Cualquier otro error → probar siguiente modelo
-        break;
+    } catch (err) {
+      clearTimeout(timer);
+      const msg = err?.message || "";
+      console.warn(`[groq] intento ${attempt}: ${msg.slice(0, 150)}`);
+      if (attempt < MAX_RETRIES) {
+        await sleep(1500 * attempt);
+        continue;
       }
     }
   }
 
-  // Si todos los modelos fallaron, devolver mensaje de fallback humano
-  console.error("[groq] ❌ Todos los modelos fallaron");
-  return "Disculpá, tuvimos un problema técnico momentáneo. Intentá de nuevo en unos segundos o escribinos y te respondemos a la brevedad 🙏";
+  console.error("[groq] Sin respuesta");
+  return "Disculpa, tuvimos un problema tecnico momentaneo. Intenta de nuevo en unos segundos.";
 }
 
 function sleep(ms) {
